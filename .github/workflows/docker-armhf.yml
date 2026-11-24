@@ -1,55 +1,76 @@
-name: ARMhf container
+name: 自动发布 pt-tools
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: pt-tools-release
+  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
 
-concurrency:
-  group: armhf-container-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  armhf:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+  version:
+    name: 自动编号
     permissions:
-      contents: read
-      packages: write
+      contents: write
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.number.outputs.version }}
+      released: ${{ steps.number.outputs.released }}
+      skip: ${{ steps.number.outputs.skip }}
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          persist-credentials: false
+      - name: 计算版本并创建标签
+        id: number
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          python3 .github/scripts/version.py
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+  image:
+    name: 构建并验证 ARMhf 镜像
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      IMAGE_NAME: ${{ vars.DOCKERHUB_NAMESPACE || secrets.DOCKERHUB_USERNAME }}/pt-tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Read build metadata
-        id: meta
-        shell: bash
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: 登录 Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: 检查已发布镜像
+        id: existing
         run: |
-          set -euo pipefail
-          upstream=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
-          {
-            echo "version=${upstream}-armhf"
-            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
-            echo "time=$(git show -s --format=%cI HEAD)"
-            echo "revision=$(git rev-parse HEAD)"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build ARMv7 image
+          inspection="$RUNNER_TEMP/release-image-inspection.log"
+          if docker buildx imagetools inspect "$IMAGE_NAME:$VERSION" >/dev/null 2>"$inspection"; then
+            echo 'found=true' >> "$GITHUB_OUTPUT"
+          elif grep -Eqi '(not found|manifest unknown|name unknown|no such manifest)' "$inspection"; then
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+          else
+            cat "$inspection" >&2
+            exit 1
+          fi
+      - name: 构建 ARMv7 镜像
+        if: steps.existing.outputs.found != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -58,47 +79,60 @@ jobs:
           tags: pt-tools:armhf-test
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
           build-args: |
             BUILD_ENV=remote
-            TAG=${{ steps.meta.outputs.version }}
-            BUILD_TIME=${{ steps.meta.outputs.time }}
-            COMMIT_ID=${{ steps.meta.outputs.revision }}
-          cache-from: type=gha,scope=armhf
-          cache-to: type=gha,scope=armhf,mode=max
-
-      - name: Run the ARMhf container
-        shell: bash
+            TAG=${{ env.VERSION }}
+            COMMIT_ID=${{ github.sha }}
+          cache-from: type=gha,scope=pt-tools-armhf
+          cache-to: type=gha,scope=pt-tools-armhf,mode=max
+      - name: 验证并推送镜像
+        if: steps.existing.outputs.found != 'true'
         run: |
           set -euo pipefail
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' pt-tools:armhf-test)" = linux/arm
           docker run --detach --name pt-tools-armhf --platform linux/arm/v7 \
             --publish 127.0.0.1:18080:8080 pt-tools:armhf-test
           trap 'docker logs pt-tools-armhf; docker rm -f pt-tools-armhf' EXIT
-          curl --retry 12 --retry-connrefused --retry-delay 1 \
+          curl --retry 24 --retry-connrefused --retry-delay 1 \
             --max-time 5 --fail --silent --show-error http://127.0.0.1:18080/login \
-            --output "/tmp/pt-tools-armhf-login.html"
-          grep -qi '<html' "/tmp/pt-tools-armhf-login.html"
+            --output "$RUNNER_TEMP/pt-tools-armhf-login.html"
+          grep -qi '<html' "$RUNNER_TEMP/pt-tools-armhf-login.html"
+          docker tag pt-tools:armhf-test "$IMAGE_NAME:$VERSION"
+          docker push "$IMAGE_NAME:$VERSION"
 
-      - name: Log in to GHCR
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+  release:
+    name: 发布 GitHub Release
+    needs: [version, image]
+    if: needs.version.outputs.skip != 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PRODUCT_NAME: pt-tools
+      RELEASE_IMAGES: ${{ vars.DOCKERHUB_NAMESPACE || secrets.DOCKERHUB_USERNAME }}/pt-tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 发布或恢复 Release
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/publish.py
+      - name: 设置 Docker Buildx
+        if: steps.publish.outputs.latest == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: 登录 Docker Hub
+        if: steps.publish.outputs.latest == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish the tested image
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        shell: bash
-        env:
-          IMAGE: ${{ steps.meta.outputs.image }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          REVISION: ${{ steps.meta.outputs.revision }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: 更新镜像 latest
+        if: steps.publish.outputs.latest == 'true'
         run: |
-          set -euo pipefail
-          for tag in "$VERSION-${REVISION:0:12}" "$VERSION" armhf; do
-            docker tag pt-tools:armhf-test "$IMAGE:$tag"
-            docker push "$IMAGE:$tag"
-          done
+          docker buildx imagetools create --tag "$RELEASE_IMAGES:latest" "$RELEASE_IMAGES:$VERSION"
