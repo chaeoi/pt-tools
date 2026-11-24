@@ -33,7 +33,7 @@ ARG GOPROXY
 COPY go.* /app/
 RUN --mount=type=bind,source=.,target=/context,ro set -eux; \
   if [ ! -f /context/dist/pt-tools-linux-${TARGETARCH} ]; then \
-    if [ -n "${GOPROXY}" ]; then \
+    if [ -n "${GOPROXY:-}" ]; then \
       GOPROXY="${GOPROXY}" go mod download; \
     elif [ "${BUILD_ENV}" = "local" ]; then \
       GOPROXY=https://goproxy.cn,direct go mod download; \
