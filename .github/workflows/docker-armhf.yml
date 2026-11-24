@@ -95,7 +95,7 @@ jobs:
           docker run --detach --name pt-tools-armhf --platform linux/arm/v7 \
             --publish 127.0.0.1:18080:8080 pt-tools:armhf-test
           trap 'docker logs pt-tools-armhf; docker rm -f pt-tools-armhf' EXIT
-          curl --retry 24 --retry-connrefused --retry-delay 1 \
+          curl --retry 30 --retry-all-errors --retry-delay 1 --retry-max-time 75 \
             --max-time 5 --fail --silent --show-error http://127.0.0.1:18080/login \
             --output "$RUNNER_TEMP/pt-tools-armhf-login.html"
           grep -qi '<html' "$RUNNER_TEMP/pt-tools-armhf-login.html"
