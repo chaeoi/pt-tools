@@ -97,6 +97,25 @@ pt-tools 是自托管的 PT 站点管理工具：按 RSS 自动下载，刷流�
 > [!WARNING]
 > RSS 未关联任何过滤规则时，pt-tools **只会下载免费种子**。追剧或下载特定的非免费资源时，请创建过滤规则并按需关闭「仅免费」。
 
+## ARMhf 适配
+
+本分支基于 [pt-tools v1.1.2](https://github.com/sunerpy/pt-tools/releases/tag/v1.1.2) 维护，适配 32 位 ARMv7 Linux 的 Docker 镜像。Git 的 `upstream` 远端跟踪官方仓库，适配改动保存在 `main`。
+
+从源码构建并启动：
+
+```bash
+docker buildx build --platform linux/arm/v7 --load \
+  --build-arg BUILD_ENV=remote --build-arg TAG=v1.1.2-armhf \
+  -t pt-tools:v1.1.2-armhf .
+
+docker run -d --name pt-tools --restart unless-stopped \
+  -p 8080:8080 -v pt-tools-data:/app/.pt-tools pt-tools:v1.1.2-armhf
+```
+
+在 x86-64 主机上构建时，Buildx 需要启用 ARM 模拟，以便执行 ARMv7 的运行时镜像步骤。前端和 Go 编译阶段使用构建主机的架构。配置数据库和密钥存放在 `/app/.pt-tools`，保存在独立卷中。
+
+[ARMhf 工作流](.github/workflows/docker-armhf.yml) 会在 `main` 上构建 `linux/arm/v7` 镜像，验证 Web 登录页，并将通过验证的镜像发布到该仓库的 GHCR。镜像标签包括 `armhf`、上游版本加 `-armhf`，以及带适配提交号的版本。
+
 ## 安装
 
 ### Docker Compose（推荐）

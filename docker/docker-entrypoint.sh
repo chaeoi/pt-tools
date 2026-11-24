@@ -53,6 +53,11 @@ checkEnv() {
 PUID=${PUID:-1000}
 PGID=${PGID:-1000}
 
+run_as=gosu
+if command -v su-exec >/dev/null 2>&1; then
+    run_as=su-exec
+fi
+
 # 镜像里还没有这个 GID / UID 时建一个具名的组与用户；已经被占用时直接沿用（例如 Unraid、群晖常用的
 # PGID=100 在 Alpine 里就是 users 组 —— 以前这里 addgroup 报「gid in use」，set -e 让容器直接退出）。
 # 运行时按数字 ID 切换，不依赖名字，所以建不成具名的组或用户也不影响启动。
@@ -70,7 +75,7 @@ fi
 # PT_MODE=relay：运行远程访问的 relay（只做转发，不读写 /app/.pt-tools，也不改它的属主）；参数从 PT_TOOLS_RELAY_* 环境变量读，
 # 例如 PT_TOOLS_RELAY_PUBLIC_URL=wss://relay.example.com、PT_TOOLS_RELAY_LISTEN=0.0.0.0:8443
 if [ "${PT_MODE:-web}" = "relay" ]; then
-    exec gosu "$PUID:$PGID" "$@" relay serve
+    exec "$run_as" "$PUID:$PGID" "$@" relay serve
 fi
 
 # 修改/app 权限 忽略挂载的只读目录报错
@@ -85,7 +90,7 @@ mainRunServer() {
     # 以目标用户运行应用（使用 exec 切换，避免启动残留 PID 1）
     HOST=${PT_HOST:-0.0.0.0}
     PORT=${PT_PORT:-8080}
-    exec gosu "$PUID:$PGID" "$@" web --host "$HOST" --port "$PORT"
+    exec "$run_as" "$PUID:$PGID" "$@" web --host "$HOST" --port "$PORT"
 }
 alias cp='cp'
 alias rm='rm'
